@@ -72,7 +72,7 @@ func getFileFromS3(bucket, key string, region string) (string, error) {
 }
 
 func ValidateToken(tokens string) (int, string, string, error) {
-	fmt.Println("in ValidateToken")
+	// fmt.Println("in ValidateToken")
 	var REGION = "ap-southeast-1"
 	var BUCKET = "cdk-hnb659fds-assets-058264531773-ap-southeast-1"
 	var KEYFILE = "token.txt"
@@ -106,9 +106,9 @@ func ValidateToken(tokens string) (int, string, string, error) {
 }
 
 func PermissionSelector(userType string, userTenan string) ([]Payload, error) {
-	fmt.Println("PermissionSelector start...")
-	fmt.Println("userType => ", userType)
-	fmt.Println("userTenan => ", userTenan)
+	// fmt.Println("PermissionSelector start...")
+	// fmt.Println("userType => ", userType)
+	// fmt.Println("userTenan => ", userTenan)
 	var tableName = "demo_user_line_id"
 	var payload []Payload
 
@@ -117,11 +117,11 @@ func PermissionSelector(userType string, userTenan string) ([]Payload, error) {
 	}))
 
 	// Create DynamoDB client
-	fmt.Println("craete DynamoDB client")
+	// fmt.Println("craete DynamoDB client")
 	svc := dynamodb.New(sess)
 
 	if userType == "admin" {
-		fmt.Println("user type admin")
+		// fmt.Println("user type admin")
 		params := &dynamodb.ScanInput{
 			TableName:        aws.String(tableName),
 			FilterExpression: aws.String("#UserTenan = :userTenanVal AND #UserType <> :userTypeValSuperAdmin"),
@@ -170,7 +170,7 @@ func PermissionSelector(userType string, userTenan string) ([]Payload, error) {
 		}
 
 	} else if userType == "super_admin" {
-		fmt.Println("user type super_admin")
+		// fmt.Println("user type super_admin")
 		params := &dynamodb.ScanInput{
 			TableName:        aws.String(tableName),
 			FilterExpression: aws.String("#UserTenan = :userTenanVal"),
@@ -214,7 +214,7 @@ func PermissionSelector(userType string, userTenan string) ([]Payload, error) {
 			payload = append(payload, setData)
 		}
 	} else if userType == "user" {
-		fmt.Println("user type user")
+		// fmt.Println("user type user")
 		params := &dynamodb.ScanInput{
 			TableName:        aws.String(tableName),
 			FilterExpression: aws.String("#UserTenan = :userTenanVal AND #UserType <> :userTypeValSuperAdmin AND #UserType <> :userTypeValAdmin"),
@@ -285,10 +285,10 @@ func handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.API
 		return events.APIGatewayProxyResponse{StatusCode: staus, Body: fmt.Sprintf("unauthorized")}, nil
 	}
 
-	fmt.Println("ValidateToken staus", staus)
+	// fmt.Println("ValidateToken staus", staus)
 
 	payload, err := PermissionSelector(userType, userTenan)
-	fmt.Println("payload ==> ", payload)
+	// fmt.Println("payload ==> ", payload)
 	if err != nil {
 		return events.APIGatewayProxyResponse{StatusCode: 500, Body: fmt.Sprintf("Internal server error")}, nil
 	}
