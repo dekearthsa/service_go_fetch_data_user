@@ -13,7 +13,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/golang-jwt/jwt"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/dynamodb"
+	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
+	"github.com/aws/aws-sdk-go/service/dynamodb/expression"
+	"github.com/golang-jwt/jwt/v4"
 )
 
 type DBdata struct {
@@ -22,6 +26,19 @@ type DBdata struct {
 	IsProduct  []string `json:"isProduct"`
 	Tenan      string   `json:"tenan"`
 	Type       string   `json:"type"`
+}
+
+type Payload struct {
+	UserID     string   `json:"userID"`
+	Email      string   `json:"email"`
+	FristName  string   `json:"fristName"`
+	LastName   string   `json:"lastName"`
+	PlantName  string   `json:"plantName"`
+	LineUserId string   `json:"lineUserId"`
+	UserTenan  string   `json:"userTenan"`
+	UserType   string   `json:"userType"`
+	Tel        string   `json:"tel"`
+	IsProduct  []string `json:"isProduct"`
 }
 
 type Claims struct {
@@ -56,21 +73,16 @@ func getFileFromS3(bucket, key string, region string) (string, error) {
 	return string(body), nil
 }
 
-func ValidateToken(tokens string) (events.APIGatewayProxyResponse, error) {
+func ValidateToken(tokens string) (int, string, error) {
 	var REGION = "ap-southeast-1"
 	var BUCKET = "cdk-hnb659fds-assets-058264531773-ap-southeast-1"
 	var KEYFILE = "token.txt"
 	setKey, err := getFileFromS3(BUCKET, KEYFILE, REGION)
 	jwtKey := []byte(setKey)
 	if err != nil {
-		return events.APIGatewayProxyResponse{
-			StatusCode: 500,
-			Body:       "Internal server error",
-		}, err
+		return 500, "Internal server error", err
 	}
-	fmt.Println("tokens => ", tokens)
 	tokenString := strings.TrimPrefix(tokens, "Bearer ")
-	fmt.Println("tokenString => ", tokenString)
 	claims := &Claims{}
 	token, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
 		if token.Method != jwt.SigningMethodHS256 {
@@ -78,48 +90,114 @@ func ValidateToken(tokens string) (events.APIGatewayProxyResponse, error) {
 		}
 		return jwtKey, nil
 	})
-	fmt.Println("token => ", token)
-	fmt.Println("claims => ", claims)
 
 	if err != nil {
-		fmt.Println("err ====> ", err)
+		// fmt.Println("err ====> ", err)
 		if err == jwt.ErrSignatureInvalid {
-			return events.APIGatewayProxyResponse{
-				StatusCode: 401,
-				Body:       "Invalid token signature",
-			}, nil
+			return 401, "unauthorized", err
 		}
-		return events.APIGatewayProxyResponse{
-			StatusCode: 400,
-			Body:       "Could not parse token",
-		}, nil
+		return 401, "unauthorized", err
 	}
 
 	if !token.Valid {
-		return events.APIGatewayProxyResponse{
-			StatusCode: 401,
-			Body:       "Invalid token",
-		}, nil
+		return 401, "unauthorized", err
 	}
 
-	// Create a response with the claims
-	respBody, err := json.Marshal(claims)
-	if err != nil {
-		log.Println("Error creating response:", err)
-		return events.APIGatewayProxyResponse{
-			StatusCode: 500,
-			Body:       "Internal server error",
-		}, nil
-	}
-
-	return events.APIGatewayProxyResponse{
-		StatusCode: 200,
-		Body:       string(respBody),
-	}, nil
+	return 200, claims.Data.Tenan, nil
 }
 
-func handler(ctx context.Context) (string, error) {
-	return "", nil
+func handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	var tableName = "demo_user_line_id"
+	token := req.Headers["authorization"]
+	if token == "" {
+		return events.APIGatewayProxyResponse{StatusCode: 401, Body: fmt.Sprintf("unauthorized")}, nil
+	}
+	staus, result, err := ValidateToken(token)
+	if err != nil {
+		return events.APIGatewayProxyResponse{StatusCode: 400, Body: fmt.Sprintf("Invalid request: %s", err)}, err
+	}
+	if staus != 200 {
+		return events.APIGatewayProxyResponse{StatusCode: staus, Body: result}, nil
+	}
+
+	sess := session.Must(session.NewSessionWithOptions(session.Options{
+		SharedConfigState: session.SharedConfigEnable,
+	}))
+
+	// Create DynamoDB client
+	svc := dynamodb.New(sess)
+	filt := expression.Name("UserTenan").Equal(expression.Value(result))
+	proj := expression.NamesList(expression.Name("Email"),
+		expression.Name("CreateDate"),
+		expression.Name("FristName"),
+		expression.Name("LastName"),
+		expression.Name("IsProduct"),
+		expression.Name("LineUserId"),
+		expression.Name("PlantName"),
+		expression.Name("Tel"),
+		expression.Name("UserID"),
+		expression.Name("UserTenan"),
+		expression.Name("UserType"),
+	)
+
+	expr, err := expression.NewBuilder().WithFilter(filt).WithProjection(proj).Build()
+	if err != nil {
+		log.Fatalf("Got error building expression: %s", err)
+	}
+
+	params := &dynamodb.ScanInput{
+		ExpressionAttributeNames:  expr.Names(),
+		ExpressionAttributeValues: expr.Values(),
+		FilterExpression:          expr.Filter(),
+		ProjectionExpression:      expr.Projection(),
+		TableName:                 aws.String(tableName),
+	}
+
+	// Make the DynamoDB Query API call
+	resultDB, err := svc.Scan(params)
+	if err != nil {
+		return events.APIGatewayProxyResponse{StatusCode: 500, Body: fmt.Sprintf("Internal server error")}, nil
+	}
+	// if resultDB.Count == 0 {
+	// 	return events.APIGatewayProxyResponse{StatusCode: 200, Body: "No user found"}, nil
+	// }
+
+	var payload []Payload
+	// err = attributevalue.UnmarshalListOfMaps(resultDB.Items, &payload)
+	for _, item := range resultDB.Items {
+		el := Payload{}
+		err = dynamodbattribute.UnmarshalMap(item, &el)
+
+		if err != nil {
+			log.Fatalf("Got error unmarshalling: %s", err)
+		}
+
+		var setData = Payload{
+			UserID:     el.UserID,
+			Email:      el.Email,
+			FristName:  el.FristName,
+			LastName:   el.LastName,
+			PlantName:  el.PlantName,
+			LineUserId: el.LineUserId,
+			UserTenan:  el.UserTenan,
+			UserType:   el.UserType,
+			Tel:        el.Tel,
+			IsProduct:  el.IsProduct,
+		}
+		payload = append(payload, setData)
+	}
+	if err != nil {
+		return events.APIGatewayProxyResponse{StatusCode: 500, Body: fmt.Sprintf("Internal server error")}, nil
+	}
+	// fmt.Println("payload => ", payload)
+	responseBody, err := json.Marshal(payload)
+	if err != nil {
+		return events.APIGatewayProxyResponse{StatusCode: 500, Body: fmt.Sprintf("Internal server error")}, nil
+	}
+	return events.APIGatewayProxyResponse{
+		StatusCode: 200,
+		Body:       string(responseBody),
+		Headers:    map[string]string{"Content-Type": "application/json"}}, nil
 }
 
 func main() {
