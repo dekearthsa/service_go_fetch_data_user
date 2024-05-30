@@ -5,18 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"strings"
 
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
-	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
-	"github.com/aws/aws-sdk-go/service/dynamodb/expression"
 	"github.com/golang-jwt/jwt/v4"
 )
 
@@ -73,14 +71,15 @@ func getFileFromS3(bucket, key string, region string) (string, error) {
 	return string(body), nil
 }
 
-func ValidateToken(tokens string) (int, string, error) {
+func ValidateToken(tokens string) (int, string, string, error) {
+	fmt.Println("in ValidateToken")
 	var REGION = "ap-southeast-1"
 	var BUCKET = "cdk-hnb659fds-assets-058264531773-ap-southeast-1"
 	var KEYFILE = "token.txt"
 	setKey, err := getFileFromS3(BUCKET, KEYFILE, REGION)
 	jwtKey := []byte(setKey)
 	if err != nil {
-		return 500, "Internal server error", err
+		return 500, "Internal server error", "Internal server error", err
 	}
 	tokenString := strings.TrimPrefix(tokens, "Bearer ")
 	claims := &Claims{}
@@ -94,102 +93,206 @@ func ValidateToken(tokens string) (int, string, error) {
 	if err != nil {
 		// fmt.Println("err ====> ", err)
 		if err == jwt.ErrSignatureInvalid {
-			return 401, "unauthorized", err
+			return 401, "unauthorized", "unauthorized", err
 		}
-		return 401, "unauthorized", err
+		return 401, "unauthorized", "unauthorized", err
 	}
 
 	if !token.Valid {
-		return 401, "unauthorized", err
+		return 401, "unauthorized", "unauthorized", err
 	}
 
-	return 200, claims.Data.Tenan, nil
+	return 200, claims.Data.Tenan, claims.Data.Type, nil
 }
 
-func handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+func PermissionSelector(userType string, userTenan string) ([]Payload, error) {
+	fmt.Println("PermissionSelector start...")
+	fmt.Println("userType => ", userType)
+	fmt.Println("userTenan => ", userTenan)
 	var tableName = "demo_user_line_id"
-	token := req.Headers["authorization"]
-	if token == "" {
-		return events.APIGatewayProxyResponse{StatusCode: 401, Body: fmt.Sprintf("unauthorized")}, nil
-	}
-	staus, result, err := ValidateToken(token)
-	if err != nil {
-		return events.APIGatewayProxyResponse{StatusCode: 400, Body: fmt.Sprintf("Invalid request: %s", err)}, err
-	}
-	if staus != 200 {
-		return events.APIGatewayProxyResponse{StatusCode: staus, Body: result}, nil
-	}
+	var payload []Payload
 
 	sess := session.Must(session.NewSessionWithOptions(session.Options{
 		SharedConfigState: session.SharedConfigEnable,
 	}))
 
 	// Create DynamoDB client
+	fmt.Println("craete DynamoDB client")
 	svc := dynamodb.New(sess)
-	filt := expression.Name("UserTenan").Equal(expression.Value(result))
-	proj := expression.NamesList(expression.Name("Email"),
-		expression.Name("CreateDate"),
-		expression.Name("FristName"),
-		expression.Name("LastName"),
-		expression.Name("IsProduct"),
-		expression.Name("LineUserId"),
-		expression.Name("PlantName"),
-		expression.Name("Tel"),
-		expression.Name("UserID"),
-		expression.Name("UserTenan"),
-		expression.Name("UserType"),
-	)
 
-	expr, err := expression.NewBuilder().WithFilter(filt).WithProjection(proj).Build()
-	if err != nil {
-		log.Fatalf("Got error building expression: %s", err)
-	}
+	if userType == "admin" {
+		fmt.Println("user type admin")
+		params := &dynamodb.ScanInput{
+			TableName:        aws.String(tableName),
+			FilterExpression: aws.String("#UserTenan = :userTenanVal AND #UserType <> :userTypeValSuperAdmin"),
+			ExpressionAttributeNames: map[string]*string{
+				"#UserType":  aws.String("UserType"),
+				"#UserTenan": aws.String("UserTenan"),
+			},
+			ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
+				":userTypeValSuperAdmin": {
+					S: aws.String("super_admin"),
+				},
+				":userTenanVal": {
+					S: aws.String(userTenan),
+				},
+			},
+		}
 
-	params := &dynamodb.ScanInput{
-		ExpressionAttributeNames:  expr.Names(),
-		ExpressionAttributeValues: expr.Values(),
-		FilterExpression:          expr.Filter(),
-		ProjectionExpression:      expr.Projection(),
-		TableName:                 aws.String(tableName),
-	}
-
-	// Make the DynamoDB Query API call
-	resultDB, err := svc.Scan(params)
-	if err != nil {
-		return events.APIGatewayProxyResponse{StatusCode: 500, Body: fmt.Sprintf("Internal server error")}, nil
-	}
-	// if resultDB.Count == 0 {
-	// 	return events.APIGatewayProxyResponse{StatusCode: 200, Body: "No user found"}, nil
-	// }
-
-	var payload []Payload
-	// err = attributevalue.UnmarshalListOfMaps(resultDB.Items, &payload)
-	for _, item := range resultDB.Items {
-		el := Payload{}
-		err = dynamodbattribute.UnmarshalMap(item, &el)
-
+		result, err := svc.Scan(params)
 		if err != nil {
-			log.Fatalf("Got error unmarshalling: %s", err)
+			fmt.Println("err admin ==> ", err)
+			return payload, err
 		}
 
-		var setData = Payload{
-			UserID:     el.UserID,
-			Email:      el.Email,
-			FristName:  el.FristName,
-			LastName:   el.LastName,
-			PlantName:  el.PlantName,
-			LineUserId: el.LineUserId,
-			UserTenan:  el.UserTenan,
-			UserType:   el.UserType,
-			Tel:        el.Tel,
-			IsProduct:  el.IsProduct,
+		for _, item := range result.Items {
+			el := Payload{}
+
+			err = dynamodbattribute.UnmarshalMap(item, &el)
+			if err != nil {
+				fmt.Println("err superadmin UnmarshalMap==> ", err)
+				return payload, err
+			}
+
+			var setData = Payload{
+				UserID:     el.UserID,
+				Email:      el.Email,
+				FristName:  el.FristName,
+				LastName:   el.LastName,
+				PlantName:  el.PlantName,
+				LineUserId: el.LineUserId,
+				UserTenan:  el.UserTenan,
+				UserType:   el.UserType,
+				Tel:        el.Tel,
+				IsProduct:  el.IsProduct,
+			}
+			payload = append(payload, setData)
 		}
-		payload = append(payload, setData)
+
+	} else if userType == "super_admin" {
+		fmt.Println("user type super_admin")
+		params := &dynamodb.ScanInput{
+			TableName:        aws.String(tableName),
+			FilterExpression: aws.String("#UserTenan = :userTenanVal"),
+			ExpressionAttributeNames: map[string]*string{
+				"#UserTenan": aws.String("UserTenan"),
+			},
+			ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
+				":userTenanVal": {
+					S: aws.String(userTenan),
+				},
+			},
+		}
+
+		result, err := svc.Scan(params)
+		if err != nil {
+			fmt.Println("err superadmin ==> ", err)
+			return payload, err
+		}
+
+		for _, item := range result.Items {
+			el := Payload{}
+
+			err = dynamodbattribute.UnmarshalMap(item, &el)
+			if err != nil {
+				fmt.Println("err superadmin UnmarshalMap==> ", err)
+				return payload, err
+			}
+
+			var setData = Payload{
+				UserID:     el.UserID,
+				Email:      el.Email,
+				FristName:  el.FristName,
+				LastName:   el.LastName,
+				PlantName:  el.PlantName,
+				LineUserId: el.LineUserId,
+				UserTenan:  el.UserTenan,
+				UserType:   el.UserType,
+				Tel:        el.Tel,
+				IsProduct:  el.IsProduct,
+			}
+			payload = append(payload, setData)
+		}
+	} else if userType == "user" {
+		fmt.Println("user type user")
+		params := &dynamodb.ScanInput{
+			TableName:        aws.String(tableName),
+			FilterExpression: aws.String("#UserTenan = :userTenanVal AND #UserType <> :userTypeValSuperAdmin AND #UserType <> :userTypeValAdmin"),
+			ExpressionAttributeNames: map[string]*string{
+				"#UserType":  aws.String("UserType"),
+				"#UserTenan": aws.String("UserTenan"),
+			},
+			ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
+				":userTypeValSuperAdmin": {
+					S: aws.String("super_admin"),
+				},
+				":userTypeValAdmin": {
+					S: aws.String("admin"),
+				},
+				":userTenanVal": {
+					S: aws.String(userTenan),
+				},
+			},
+		}
+
+		result, err := svc.Scan(params)
+		if err != nil {
+			fmt.Println("err user ==> ", err)
+			return payload, err
+		}
+
+		for _, item := range result.Items {
+			el := Payload{}
+
+			err = dynamodbattribute.UnmarshalMap(item, &el)
+			if err != nil {
+				fmt.Println("err user UnmarshalMap==> ", err)
+				return payload, err
+			}
+
+			var setData = Payload{
+				UserID:     el.UserID,
+				Email:      el.Email,
+				FristName:  el.FristName,
+				LastName:   el.LastName,
+				PlantName:  el.PlantName,
+				LineUserId: el.LineUserId,
+				UserTenan:  el.UserTenan,
+				UserType:   el.UserType,
+				Tel:        el.Tel,
+				IsProduct:  el.IsProduct,
+			}
+			payload = append(payload, setData)
+		}
 	}
+	return payload, nil
+
+}
+
+func handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+	// var tableName = "demo_user_line_id"
+	token := req.Headers["authorization"]
+	if token == "" {
+		return events.APIGatewayProxyResponse{StatusCode: 401, Body: fmt.Sprintf("unauthorized")}, nil
+	}
+
+	staus, userTenan, userType, err := ValidateToken(token)
+	if err != nil {
+		return events.APIGatewayProxyResponse{StatusCode: 400, Body: fmt.Sprintf("Invalid request: %s", err)}, err
+	}
+
+	if staus != 200 {
+		return events.APIGatewayProxyResponse{StatusCode: staus, Body: fmt.Sprintf("unauthorized")}, nil
+	}
+
+	fmt.Println("ValidateToken staus", staus)
+
+	payload, err := PermissionSelector(userType, userTenan)
+	fmt.Println("payload ==> ", payload)
 	if err != nil {
 		return events.APIGatewayProxyResponse{StatusCode: 500, Body: fmt.Sprintf("Internal server error")}, nil
 	}
-	// fmt.Println("payload => ", payload)
+
 	responseBody, err := json.Marshal(payload)
 	if err != nil {
 		return events.APIGatewayProxyResponse{StatusCode: 500, Body: fmt.Sprintf("Internal server error")}, nil
